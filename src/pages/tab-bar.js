@@ -70,7 +70,10 @@ class TabBar extends HTMLElement {
     if (activeWebview && tab) {
       const currentSrc = activeWebview.getAttribute('src');
       // Avoid aborting in-flight navigation with a duplicate src
-      if (currentSrc !== tab.url && !activeWebview.isLoading?.()) {
+      // If webview has no src and we have history, don't set it yet (handled by restore)
+      if (!currentSrc && tab.history) {
+        // Do nothing, waiting for restore
+      } else if (currentSrc !== tab.url && !activeWebview.isLoading?.()) {
         activeWebview.setAttribute('src', tab.url);
       }
     }
@@ -211,7 +214,8 @@ getAllTabGroups() {
           title: tab.title,
           protocol: tab.protocol,
           isPinned: this.pinnedTabs.has(tab.id),
-          groupId: this.tabGroupAssignments.get(tab.id) || null
+          groupId: this.tabGroupAssignments.get(tab.id) || null,
+          history: tab.history // Persist navigation history
         })),
         activeTabId: this.activeTabId,
         tabCounter: this.tabCounter,
@@ -271,7 +275,8 @@ restoreTabs(persistedData) {
 
   // Restore each tab
   persistedData.tabs.forEach(tabData => {
-    const tabId = this.addTabWithId(tabData.id, tabData.url, tabData.title);
+    // Pass history to addTabWithId for restoration
+    const tabId = this.addTabWithId(tabData.id, tabData.url, tabData.title, tabData.history);
     
     // Restore pinned state
     if (tabData.isPinned) {
@@ -331,7 +336,7 @@ restoreTabs(persistedData) {
 }
 
   // Add tab with specific ID (for restoration)
-  addTabWithId(tabId, url = "peersky://home", title = "Home") {
+  addTabWithId(tabId, url = "peersky://home", title = "Home", history = null) {
     // Create tab UI
     const tab = document.createElement("div");
     tab.className = "tab";
@@ -367,11 +372,13 @@ restoreTabs(persistedData) {
     
     this.tabContainer.appendChild(tab);
     const protocol = this._getProtocol(url);
-    this.tabs.push({id: tabId, url, title, protocol});
+    
+    // Store history in memory
+    this.tabs.push({id: tabId, url, title, protocol, history});
     
     // Create webview for this tab if container exists
     if (this.webviewContainer) {
-      this.createWebviewForTab(tabId, url);
+      this.createWebviewForTab(tabId, url, history);
     }
     
     this._updateP2PIndicator(tabId);
@@ -502,7 +509,7 @@ restoreTabs(persistedData) {
   }
 
   // Create a new webview for a tab
-  createWebviewForTab(tabId, url) {
+  createWebviewForTab(tabId, url, history = null) {
     // Create webview element
     const webview = document.createElement("webview");
     webview.id = `webview-${tabId}`;
@@ -514,8 +521,13 @@ restoreTabs(persistedData) {
     const preloadURL = pathToFileURL(preloadPath).href;
     webview.setAttribute("preload", preloadURL);
     webview.setAttribute("webpreferences", "contextIsolation=yes,nativeWindowOpen=yes");
-    // Set important attributes
-    webview.setAttribute("src", url);
+    
+    // IMPORTANT: Do NOT set src immediately if we have history to restore
+    // This prevents the initial navigation which causes "previously loaded page" error
+    if (!history) {
+      webview.setAttribute("src", url);
+    }
+    
     webview.setAttribute("allowpopups", "");
     // webview.setAttribute("webpreferences", "backgroundThrottling=false");
     // webview.setAttribute("nodeintegration", "");
@@ -527,6 +539,32 @@ restoreTabs(persistedData) {
     
     // Add to container first, then set up events
     this.webviewContainer.appendChild(webview);
+
+    // Handle history restoration using did-attach (triggered when guest view is created)
+    if (history) {
+      const restoreHistory = async () => {
+        try {
+          // Wait for web contents ID to be available
+          const webContentsId = webview.getWebContentsId();
+          const { ipcRenderer } = require('electron');
+          console.log(`Restoring history for tab ${tabId}`, history);
+          const success = await ipcRenderer.invoke('restore-tab-history', { webContentsId, history });
+          
+          // If restoration failed or returned false, we must load the URL manually
+          if (!success) {
+            console.warn(`History restoration failed for tab ${tabId}, falling back to simple load.`);
+            webview.setAttribute("src", url);
+          }
+        } catch (error) {
+          console.error('Failed to restore tab history:', error);
+          // Fallback
+          webview.setAttribute("src", url);
+        }
+      };
+      
+      // Restore history once webview is attached 
+      webview.addEventListener('did-attach', restoreHistory, { once: true });
+    }
     
     // Add a load event to ensure webview is properly initialized
     webview.addEventListener('dom-ready', () => {
@@ -566,6 +604,27 @@ restoreTabs(persistedData) {
 
   // Set up all event handlers for a webview
   setupWebviewEvents(webview, tabId) {
+    // Function to update tab history state
+    const updateTabHistory = async () => {
+      try {
+        const { ipcRenderer } = require('electron');
+        // Only try if we have a valid web contents ID
+        if (webview.getWebContentsId) {
+          const webContentsId = webview.getWebContentsId();
+          const history = await ipcRenderer.invoke('get-tab-history', webContentsId);
+          
+          if (history) {
+            const tab = this.tabs.find(t => t.id === tabId);
+            if (tab) {
+              tab.history = history;
+            }
+          }
+        }
+      } catch (error) {
+        // Ignore errors, likely due to race conditions during close/navigate
+      }
+    };
+
     webview.addEventListener("did-start-loading", () => {
       const tabElement = document.getElementById(tabId);
       if (tabElement) {
@@ -621,6 +680,20 @@ restoreTabs(persistedData) {
       this.dispatchEvent(new CustomEvent("tab-navigated", { 
         detail: { tabId, url: newUrl } 
       }));
+      
+      // Update history on navigation
+      updateTabHistory();
+
+      setTimeout(() => {
+        this.dispatchEvent(new CustomEvent("navigation-state-changed", {
+          detail: { tabId }
+        }));
+      }, 100);
+    });
+
+    webview.addEventListener("did-navigate-in-page", () => {
+      // Update history on in-page navigation (SPA routing)
+      updateTabHistory();
       
       setTimeout(() => {
         this.dispatchEvent(new CustomEvent("navigation-state-changed", {

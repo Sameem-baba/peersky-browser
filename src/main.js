@@ -322,4 +322,56 @@ ipcMain.on('update-group-properties', (_event, groupId, properties) => {
     }
   });
 });
+
+// --- Navigation History Handlers ---
+
+ipcMain.handle('get-tab-history', async (event, webContentsId) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return null;
+
+    // navigationHistory API check
+    if (!wc.navigationHistory) return null;
+
+    return {
+      entries: wc.navigationHistory.getAllEntries().map(entry => ({
+        url: entry.url,
+        title: entry.title
+      })),
+      activeIndex: wc.navigationHistory.getActiveIndex()
+    };
+  } catch (error) {
+    // console.error('Error getting tab history:', error);
+    return null;
+  }
+});
+
+ipcMain.handle('restore-tab-history', async (event, { webContentsId, history }) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return false;
+    if (!wc.navigationHistory) return false;
+    if (!history || !history.entries || history.entries.length === 0) return false;
+
+    // Force clear history first
+    wc.navigationHistory.clear();
+
+    // Restore history - DO NOT AWAIT result
+    // This prevents blocking the renderer if background tab loads are throttled
+    wc.navigationHistory.restore({
+      entries: history.entries,
+      index: history.activeIndex
+    }).catch(err => {
+       // This error is expected if the page fails to load (e.g. network error)
+       // but the history entries are usually still restored.
+       console.warn('Background history restore completed with load warning:', err.message);
+    });
+    
+    return true; // Optimistically return true
+  } catch (error) {
+    console.error('Error restoring tab history:', error);
+    return false;
+  }
+});
+
 export { windowManager };

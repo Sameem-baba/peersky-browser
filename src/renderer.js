@@ -499,15 +499,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.error("webviewElement not found in webviewContainer");
     }
 
-    const urlInput = nav.querySelector("#url");
-    if (urlInput) {
-      urlInput.addEventListener("keypress", async (e) => {
-        if (e.key === "Enter") {
-          const rawURL = urlInput.value.trim();
-          await navigateTo(rawURL);
-        }
-      });
-    }
+    // const urlInput = nav.querySelector("#url");
+    // if (urlInput) {
+    //   urlInput.addEventListener("keypress", async (e) => {
+    //     if (e.key === "Enter") {
+    //       const rawURL = urlInput.value.trim();
+    //       await navigateTo(rawURL);
+    //     }
+    //   });
+    // }
 
     // Update URL display and send navigation event
     webviewContainer.addEventListener("did-navigate", (e) => {
