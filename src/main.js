@@ -244,19 +244,6 @@ app.whenReady().then(async () => {
 
   await setupPermissionHandler(userSession);
 
-  // Initialize extension system
-  try {
-    log.info("Initializing extension system...");
-    await extensionManager.initialize({ app, session: userSession });
-    log.info("Extension system initialized successfully");
-
-    // Setup extension IPC handlers
-    setupExtensionIpcHandlers(extensionManager);
-    log.info("Extension IPC handlers registered");
-  } catch (error) {
-    log.error("Failed to initialize extension system:", error);
-  }
-
   // Check for --new-window argument (from Windows taskbar jump list)
   const hasNewWindowArg = process.argv.includes('--new-window');
   
@@ -322,6 +309,36 @@ app.whenReady().then(async () => {
   // Initialize AutoUpdater after windowManager is ready
   // console.log("App is prepared, setting up AutoUpdater...");
   // setupAutoUpdater();
+
+  let startExtensionsResolve;
+  extensionManager.initializationPromise = new Promise((resolve) => {
+    startExtensionsResolve = resolve;
+  }).then(() => {
+    log.info("Initializing extension system in background...");
+    return extensionManager._doInitialize({ app, session: userSession });
+  }).then(() => {
+    log.info("Extension system initialized successfully");
+  }).catch(error => {
+    log.error("Failed to initialize extension system:", error);
+  });
+
+  setupExtensionIpcHandlers(extensionManager);
+  log.info("Extension IPC handlers registered upfront");
+
+  let extensionsInitialized = false;
+  const initExtensions = () => {
+    if (extensionsInitialized) return;
+    extensionsInitialized = true;
+
+    startExtensionsResolve();
+  };
+
+  if (mainWindow && mainWindow.window) {
+    mainWindow.window.once('ready-to-show', initExtensions);
+    setTimeout(initExtensions, 2000);
+  } else {
+    setTimeout(initExtensions, 500);
+  }
 });
 
 // Introduce a flag to prevent multiple 'before-quit' handling
