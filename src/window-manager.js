@@ -50,6 +50,7 @@ class WindowManager {
     this.shutdownInProgress = false;
     this.finalSaveCompleted = false;
     this.saveQueue = Promise.resolve();
+    this.saveDebounceTimer = null;
     this.registerListeners();
 
     // Treat Ctrl+C / SIGTERM as explicit quits in dev:
@@ -702,36 +703,43 @@ class WindowManager {
       }
     }
 
-    //Never save(periodic saves) during shutdown
-    if (this.shutdownInProgress) {
+    // Never save during shutdown
+    if (this.shutdownInProgress || this.finalSaveCompleted) {
       log.info("Shutdown in progress - saveOpened blocked");
       return;
     }
 
-    if (this.finalSaveCompleted) {
-      log.info("Final save completed - saveOpened blocked");
+    if (forceSave) {
+      return this._executeSave();
+    }
+
+    // Debounce to prevent the cascading disk I/O loop
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+    }
+
+    return new Promise((resolve) => {
+      this.saveDebounceTimer = setTimeout(async () => {
+        resolve(await this._executeSave());
+      }, 2000);
+    });
+  }
+
+  async _executeSave() {
+    if (this.isSaving) {
+      log.warn("Save already in progress");
       return;
     }
 
-    // Queue saves to prevent concurrent operations
     this.saveQueue = this.saveQueue.then(async () => {
-      // Double-check we're not shutting down
-      if (this.shutdownInProgress || this.finalSaveCompleted) {
-        return;
-      }
-
-      if (this.isSaving && !forceSave) {
-        log.warn("Save already in progress");
-        return;
-      }
+      if (this.shutdownInProgress || this.finalSaveCompleted) return;
 
       this.isSaving = true;
-
       try {
         await this.saveCompleteState();
         return true;
       } catch (error) {
-        log.error("Error in saveOpened:", error);
+        log.error("Error in executeSave:", error);
         return false;
       } finally {
         this.isSaving = false;
